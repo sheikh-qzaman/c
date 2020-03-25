@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <mcheck.h>
+#include <assert.h>
 
 typedef struct
 {
@@ -46,6 +47,9 @@ person* create_person(char *name, char *street, char *city, int zip)
 int main (void)
 {
     mtrace();
+
+    return 0;
+
     //char*   name = calloc(1000, sizeof(char));
     char*   name = malloc(1000 * sizeof(char));
     name = "Welcome!";
