@@ -11,12 +11,30 @@
 #define PORT     8080 
 #define MAXLINE 1024 
 
+void start_server(int sockfd)
+{
+    int len, n;
+    char buffer[MAXLINE];
+    char *hello = "Hello from server";
+    struct sockaddr_in cliaddr;
+
+    while(1) {
+        memset(&cliaddr, 0, sizeof(cliaddr));
+
+        len = sizeof(cliaddr); //len is value/resuslt
+
+        n = recvfrom(sockfd, (char *)buffer, MAXLINE, MSG_WAITALL, ( struct sockaddr *) &cliaddr, &len);
+        buffer[n] = '\0';
+        printf("Client : %s\n", buffer);
+        sendto(sockfd, (const char *)hello, strlen(hello), MSG_CONFIRM, (const struct sockaddr *) &cliaddr, len);
+        printf("Hello message sent.\n");
+    }
+}
+
 // Driver code 
 int main() { 
     int sockfd; 
-    char buffer[MAXLINE]; 
-    char *hello = "Hello from server"; 
-    struct sockaddr_in servaddr, cliaddr; 
+    struct sockaddr_in servaddr;
     
     // Creating socket file descriptor 
     if ( (sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0 ) { 
@@ -25,12 +43,11 @@ int main() {
     } 
     
     memset(&servaddr, 0, sizeof(servaddr)); 
-    memset(&cliaddr, 0, sizeof(cliaddr)); 
     
     // Filling server information 
     servaddr.sin_family = AF_INET; // IPv4 
     //servaddr.sin_addr.s_addr = INADDR_ANY; 
-    servaddr.sin_addr.s_addr = inet_addr("15.0.0.1"); 
+    servaddr.sin_addr.s_addr = inet_addr("15.0.0.2"); 
     servaddr.sin_port = htons(PORT); 
     
     // Bind the socket with the server address 
@@ -41,19 +58,7 @@ int main() {
         exit(EXIT_FAILURE); 
     } 
     
-    int len, n; 
-
-    len = sizeof(cliaddr); //len is value/resuslt 
-
-    n = recvfrom(sockfd, (char *)buffer, MAXLINE, 
-                MSG_WAITALL, ( struct sockaddr *) &cliaddr, 
-                &len); 
-    buffer[n] = '\0'; 
-    printf("Client : %s\n", buffer); 
-    sendto(sockfd, (const char *)hello, strlen(hello), 
-        MSG_CONFIRM, (const struct sockaddr *) &cliaddr, 
-            len); 
-    printf("Hello message sent.\n"); 
+    start_server(sockfd);     
     
     return 0; 
 } 
