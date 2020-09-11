@@ -12,7 +12,7 @@
 #include <event2/event.h>
 
 #define DNS_TIMEOUT_MS              4000
-#define MAX_NAMESERVERS             16
+#define MAX_NAMESERVERS             3
 #define USE_BITMASK					0
 
 typedef struct dns_ctx
@@ -33,15 +33,15 @@ get_dns_ctx(void)
 static void
 ares_ev_cb (evutil_socket_t  sockfd, short event, void *args)
 {
-	printf("ares_ev_cb\n");
+	printf("%s: socket %d ", __func__, sockfd);
 	t_dns_ctx *dns_ctx_p = get_dns_ctx();
 
     if (event & EV_TIMEOUT) {
-		printf("EV_TIMEOUT\n");
+		printf("Event: TIMEOUT\n");
         ares_process_fd(dns_ctx_p->channel, sockfd, ARES_SOCKET_BAD);
 
     } else if (event & EV_READ) {
-		printf("EV_READ\n");
+		printf("Event: READ\n");
         ares_process_fd(dns_ctx_p->channel, sockfd, ARES_SOCKET_BAD);
     }
 }
@@ -49,7 +49,7 @@ ares_ev_cb (evutil_socket_t  sockfd, short event, void *args)
 static void
 ares_state_cb(void *data, int fd, int read, int write)
 {
-    printf("Change state fd %d read:%d write:%d\n", fd, read, write);
+    printf("%s: State change fd %d read:%d write:%d\n", __func__, fd, read, write);
 	t_dns_ctx *dns_ctx_p = get_dns_ctx();
 
 	if(USE_BITMASK) {
@@ -62,7 +62,7 @@ ares_state_cb(void *data, int fd, int read, int write)
 	timeout = ares_timeout(dns_ctx_p->channel, NULL, &tv);
 
 	if (read) {
-		printf("Adding event for FD: %d\n", fd);
+		printf("%s: Adding event for FD: %d\n", __func__, fd);
 		read_evt = event_new(dns_ctx_p->base, fd, EV_PERSIST | EV_READ | EV_TIMEOUT, ares_ev_cb, dns_ctx_p->channel);
 		event_add(read_evt, timeout);
 	}
@@ -71,11 +71,10 @@ ares_state_cb(void *data, int fd, int read, int write)
 static void
 ares_res_cb(void *arg, int status, int timeouts, struct ares_addrinfo *host)
 {
-	printf("ares_res_cb\n");
     struct ares_addrinfo_node   *p_node;
 
     if(!host || status != ARES_SUCCESS){
-        printf("Failed to lookup %s\n", ares_strerror(status));
+        printf("%s: Failed to lookup %s\n", __func__, ares_strerror(status));
         return;
     }
 
@@ -89,7 +88,7 @@ ares_res_cb(void *arg, int status, int timeouts, struct ares_addrinfo *host)
             struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)p_node->ai_addr;
             inet_ntop(p_node->ai_family, &(sin6->sin6_addr), ip, sizeof(ip));
         }
-        printf("Address: %s\n", ip);
+        printf("%s: Address: %s\n", __func__, ip);
     }
 }
 
@@ -125,7 +124,7 @@ ares_init2()
 
     status = ares_library_init(ARES_LIB_INIT_ALL);
     if (status != ARES_SUCCESS){
-        printf("ares_library_init: %s\n", ares_strerror(status));
+        printf("%s: ares_library_init: %s\n", __func__, ares_strerror(status));
     }
 }
 
