@@ -15,9 +15,6 @@
 #define MAX_NAMESERVERS             16
 #define USE_BITMASK					0
 
-ares_channel					channel;
-struct ares_addrinfo_hints* 	hint;
-
 typedef struct dns_ctx
 {
 	struct event_base 				*base;
@@ -37,18 +34,17 @@ static void
 ares_ev_cb (evutil_socket_t  sockfd, short event, void *args)
 {
 	printf("ares_ev_cb\n");
-	ares_channel   channel = args;
+	t_dns_ctx *dns_ctx_p = get_dns_ctx();
 
     if (event & EV_TIMEOUT) {
 		printf("EV_TIMEOUT\n");
-        ares_process_fd(channel, sockfd, ARES_SOCKET_BAD);
+        ares_process_fd(dns_ctx_p->channel, sockfd, ARES_SOCKET_BAD);
 
     } else if (event & EV_READ) {
 		printf("EV_READ\n");
-        ares_process_fd(channel, sockfd, ARES_SOCKET_BAD);
+        ares_process_fd(dns_ctx_p->channel, sockfd, ARES_SOCKET_BAD);
     }
 }
-
 
 static void
 ares_state_cb(void *data, int fd, int read, int write)
@@ -63,11 +59,11 @@ ares_state_cb(void *data, int fd, int read, int write)
 	struct timeval			tv, *timeout;
     struct event 			*read_evt;
 
-	timeout = ares_timeout(channel, NULL, &tv);
+	timeout = ares_timeout(dns_ctx_p->channel, NULL, &tv);
 
 	if (read) {
 		printf("Adding event for FD: %d\n", fd);
-		read_evt = event_new(dns_ctx_p->base, fd, EV_PERSIST | EV_READ | EV_TIMEOUT, ares_ev_cb, channel);
+		read_evt = event_new(dns_ctx_p->base, fd, EV_PERSIST | EV_READ | EV_TIMEOUT, ares_ev_cb, dns_ctx_p->channel);
 		event_add(read_evt, timeout);
 	}
 }
@@ -149,7 +145,7 @@ main(void)
     hints.ai_socktype   = SOCK_DGRAM;
     hints.ai_protocol   = IPPROTO_UDP;
     hints.ai_flags      = EVUTIL_AI_CANONNAME;
-    hint                = &hints;
+    dns_ctx_p->hint     = &hints;
     
     options.timeout = DNS_TIMEOUT_MS;
     options.tries = 1;
@@ -159,14 +155,14 @@ main(void)
     optmask |= ARES_OPT_TRIES;
     optmask |= ARES_OPT_SOCK_STATE_CB;
 
-    status = ares_init_options(&channel, &options, optmask);
+    status = ares_init_options(&(dns_ctx_p->channel), &options, optmask);
     if(status != ARES_SUCCESS) {
         printf("ares_init_options: %s\n", ares_strerror(status));
         return 1;
     }
 
     //ares_gethostbyname(channel, "vbond.cisco.com", AF_INET, callback, NULL);
-    ares_getaddrinfo(channel, "centos.com", NULL, hint , ares_res_cb, NULL);
+    ares_getaddrinfo(dns_ctx_p->channel, "centos.com", NULL, dns_ctx_p->hint , ares_res_cb, NULL);
 
 	if (USE_BITMASK) {
 		//ares_create_event(channel); 
@@ -174,7 +170,7 @@ main(void)
 
     //wait_ares(channel);
 	event_base_dispatch(dns_ctx_p->base);
-    ares_destroy(channel);
+    ares_destroy(dns_ctx_p->channel);
     ares_library_cleanup();
     printf("fin\n");
     return 0;
