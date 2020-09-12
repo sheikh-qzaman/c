@@ -10,7 +10,7 @@
 #include <ctype.h>
 #include <unistd.h>
 
-#define DNS_TIMEOUT_MS           40000
+#define DNS_TIMEOUT_MS           4000
 int resolved = 0;
 
 static void

@@ -71,15 +71,16 @@ ares_init2()
 static void
 ares_ev_cb (evutil_socket_t  sockfd, short event, void *args)
 {
-	printf("%s: socket %d ", __func__, sockfd);
+	printf("%s: socket %d Event: ", __func__, sockfd);
 	t_dns_ctx *dns_ctx_p = get_dns_ctx();
 
     if (event & EV_TIMEOUT) {
-		printf("Event: TIMEOUT\n");
-        ares_process_fd(dns_ctx_p->channel, sockfd, ARES_SOCKET_BAD);
+		printf("TIMEOUT\n");
+        //ares_process_fd(dns_ctx_p->channel, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
+        ares_process_fd(dns_ctx_p->channel, sockfd, sockfd);
 
     } else if (event & EV_READ) {
-		printf("Event: READ\n");
+		printf("READ\n");
         ares_process_fd(dns_ctx_p->channel, sockfd, ARES_SOCKET_BAD);
     }
 }
@@ -87,16 +88,12 @@ ares_ev_cb (evutil_socket_t  sockfd, short event, void *args)
 static void
 ares_state_cb(void *data, int fd, int read, int write)
 {
-    printf("%s: State change fd %d read:%d write:%d\n", __func__, fd, read, write);
-	t_dns_ctx *dns_ctx_p = get_dns_ctx();
-
-	if(USE_BITMASK) {
-		return;
-	}
-
 	struct timeval			tv, *timeout;
     struct event 			*read_evt;
 
+    printf("%s: State change fd %d read:%d write:%d\n", __func__, fd, read, write);
+
+	t_dns_ctx *dns_ctx_p = get_dns_ctx();
 	timeout = ares_timeout(dns_ctx_p->channel, NULL, &tv);
 
 	if (read) {
@@ -148,6 +145,6 @@ main(void)
 	event_base_dispatch(dns_ctx_p->base);
     ares_destroy(dns_ctx_p->channel);
     ares_library_cleanup();
-    printf("fin\n");
+    printf("%s: Finished!\n", __func__);
     return 0;
 }
