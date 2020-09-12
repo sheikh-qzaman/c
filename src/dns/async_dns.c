@@ -5,7 +5,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netdb.h>
-#include <stdarg.h>
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
@@ -92,31 +91,6 @@ ares_res_cb(void *arg, int status, int timeouts, struct ares_addrinfo *host)
     }
 }
 
-/*
-void
-ares_create_event(ares_channel channel)
-{
-	int						bitmask, socks[MAX_NAMESERVERS];
-	struct timeval			tv, *timeout;
-    struct event 			*read_evt[MAX_NAMESERVERS];
-
-	timeout = ares_timeout(channel, NULL, &tv);
-    bitmask = ares_getsock(channel, socks, MAX_NAMESERVERS);
-
-    for (int i = 0, j = 0; i < MAX_NAMESERVERS; i++) {
-		printf("Current socket: %d\n", i);
-        if (ARES_GETSOCK_READABLE(bitmask, i)) {
-			printf("%d is readable.\n", i);
-            read_evt[j] = event_new(base, socks[i], 
-                                    EV_PERSIST | EV_READ | EV_TIMEOUT,
-                                    ares_ev_cb, channel);
-			printf("Adding event %d.\n", i);
-			event_add(read_evt[j++], timeout);
-        }
-    }
-}
-*/
-
 void
 ares_init2()
 {
@@ -160,14 +134,8 @@ main(void)
         return 1;
     }
 
-    //ares_gethostbyname(channel, "vbond.cisco.com", AF_INET, callback, NULL);
     ares_getaddrinfo(dns_ctx_p->channel, "centos.com", NULL, dns_ctx_p->hint , ares_res_cb, NULL);
 
-	if (USE_BITMASK) {
-		//ares_create_event(channel); 
-	}
-
-    //wait_ares(channel);
 	event_base_dispatch(dns_ctx_p->base);
     ares_destroy(dns_ctx_p->channel);
     ares_library_cleanup();
