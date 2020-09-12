@@ -14,6 +14,9 @@
 #define MAX_NAMESERVERS             3
 #define USE_BITMASK					0
 
+static void
+ares_state_cb(void *data, int fd, int read, int write);
+
 typedef struct dns_ctx
 {
 	struct event_base 				*base;
@@ -27,6 +30,42 @@ t_dns_ctx *
 get_dns_ctx(void)
 {
 	return &dns_ctx;
+}
+
+int
+ares_init2()
+{
+	struct ares_options				options;
+    struct ares_addrinfo_hints 		hints;
+    int 							status, optmask = 0;
+
+	t_dns_ctx *dns_ctx_p = get_dns_ctx();
+
+    status = ares_library_init(ARES_LIB_INIT_ALL);
+    if (status != ARES_SUCCESS){
+        printf("%s: ares_library_init: %s\n", __func__, ares_strerror(status));
+    }
+
+    hints.ai_family     = AF_UNSPEC;
+    hints.ai_socktype   = SOCK_DGRAM;
+    hints.ai_protocol   = IPPROTO_UDP;
+    hints.ai_flags      = EVUTIL_AI_CANONNAME;
+    dns_ctx_p->hint     = &hints;
+
+    options.timeout = DNS_TIMEOUT_MS;
+    options.tries = 1;
+    options.sock_state_cb = ares_state_cb;
+
+    optmask |= ARES_OPT_TIMEOUTMS;
+    optmask |= ARES_OPT_TRIES;
+    optmask |= ARES_OPT_SOCK_STATE_CB;
+
+    status = ares_init_options(&(dns_ctx_p->channel), &options, optmask);
+    if(status != ARES_SUCCESS) {
+        printf("ares_init_options: %s\n", ares_strerror(status));
+		return -1;
+    }
+	return 0;
 }
 
 static void
@@ -91,48 +130,18 @@ ares_res_cb(void *arg, int status, int timeouts, struct ares_addrinfo *host)
     }
 }
 
-void
-ares_init2()
-{
-	int status;
-
-    status = ares_library_init(ARES_LIB_INIT_ALL);
-    if (status != ARES_SUCCESS){
-        printf("%s: ares_library_init: %s\n", __func__, ares_strerror(status));
-    }
-}
-
 int
 main(void)
 {
+	int status;
+
 	t_dns_ctx *dns_ctx_p = get_dns_ctx();
     dns_ctx_p->base = event_base_new();
 
-	ares_init2();
-
-    struct ares_options				options;
-    struct ares_addrinfo_hints 		hints;
-    int 							status, optmask = 0;
-
-    hints.ai_family     = AF_UNSPEC;
-    hints.ai_socktype   = SOCK_DGRAM;
-    hints.ai_protocol   = IPPROTO_UDP;
-    hints.ai_flags      = EVUTIL_AI_CANONNAME;
-    dns_ctx_p->hint     = &hints;
-    
-    options.timeout = DNS_TIMEOUT_MS;
-    options.tries = 1;
-    options.sock_state_cb = ares_state_cb;
-
-    optmask |= ARES_OPT_TIMEOUTMS;
-    optmask |= ARES_OPT_TRIES;
-    optmask |= ARES_OPT_SOCK_STATE_CB;
-
-    status = ares_init_options(&(dns_ctx_p->channel), &options, optmask);
-    if(status != ARES_SUCCESS) {
-        printf("ares_init_options: %s\n", ares_strerror(status));
-        return 1;
-    }
+	status = ares_init2();
+	if (status != ARES_SUCCESS) {
+		printf("%s: c-ares parameter initialization error.", __func__);
+	}
 
     ares_getaddrinfo(dns_ctx_p->channel, "centos.com", NULL, dns_ctx_p->hint , ares_res_cb, NULL);
 
