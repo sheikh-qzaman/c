@@ -27,14 +27,28 @@
 
 extern int    errno;
 
-#define LINELEN 128
-#define MAX_SELECT_ATTEMPTS 50
+#define LINELEN                     12
+#define MAX_SELECT_ATTEMPTS         50
+#define CLIENT_ADD_INTERVAL_SEC     1
+#define CLIENT_ADD_INTERVAL_MSEC    0 
+#define CLIENT_DEL_INTERVAL_SEC     5
+#define MSG_SEND_INTERVAL_SEC       1 
+#define MSG_SEND_INTERVAL_MSEC      0
+#define ERR_OK                      0
+#define TCP_ERR                     1
 
-struct event        *timer_ev;
+void delete_ssl_peer();
+
+struct event        *client_add_timer;
+struct event        *client_del_timer;
 struct timeval      tv;
-struct bufferevent  *bev;
-
-t_ssl_peer          *p_ssl_peer;
+struct timeval      del_tv;
+char                *host = "15.0.0.2";
+int                 port = 4433;
+t_ssl_peer          *p_peer;
+struct event_base   *evbase;
+SSL_CTX             *ssl_client_ctx;
+int                 count = 0;
 
 int errexit(const char *format, ...)
 {
@@ -49,11 +63,9 @@ int errexit(const char *format, ...)
 int
 connectsock(const char *host, int port)
 {
-    struct hostent      *phe; 	/* pointer to host information entry    */
     struct sockaddr_in  sin; 	/* an Internet endpoint address         */
     int                 sock; 	/* socket descriptor                    */
-    int                 ret;
-    int                 retry_attempts = 0;
+    int                 ret, retry_attempts = 0, flag = 1;
 
     memset(&sin, 0, sizeof(sin));
     sin.sin_family = AF_INET;
@@ -66,12 +78,22 @@ connectsock(const char *host, int port)
     sin.sin_addr.s_addr = inet_addr(host);
 
     /* Allocate a socket */
-    sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) {
         errexit("can't create socket: %s\n", strerror(errno));
     }
 
     evutil_make_socket_nonblocking(sock);
+
+    p_peer->listener_fd = sock;
+
+    // TODO do we need it for client?
+    /*
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag)) < 0) {
+        close(socket);
+        return 1;
+    }
+    */
 
     /* Connect the socket */
     ret = connect(sock, (struct sockaddr *)&sin, sizeof(sin));
@@ -116,7 +138,7 @@ connectsock(const char *host, int port)
         }
 	}
 
-    return sock;
+    return 0;
 }
 
 static int
@@ -143,8 +165,6 @@ cert_verify_callback(int preverify_ok, X509_STORE_CTX *ctx)
 static SSL_CTX*
 create_ssl_ctx()
 {
-    SSL_CTX  *client_ctx;
-
     /* Initialize the OpenSSL library */
     SSL_library_init();
     SSL_load_error_strings();
@@ -154,22 +174,41 @@ create_ssl_ctx()
         return NULL;
     }
 
-    client_ctx = SSL_CTX_new(SSLv23_client_method());
+    ssl_client_ctx = SSL_CTX_new(SSLv23_client_method());
 
-    SSL_CTX_set_verify_depth(client_ctx, 1);
+    /*
+     * This function sets the maximum allowable depth for peer certificates. In other words, it limits the number of certificates that we are
+     * willing to verify in order to ensure the chain is trusted. For example, if the depth was set to four and six certificates are present
+     * in the chain to reach the trusted certificate, the verification would fail because the required depth would be too great.
+     */
+    SSL_CTX_set_verify_depth(ssl_client_ctx, 1);
 
-    SSL_CTX_set_ecdh_auto(client_ctx, 1);
+    SSL_CTX_set_ecdh_auto(ssl_client_ctx, 1);
 
     // ca certificate
-    if (!SSL_CTX_load_verify_locations(client_ctx, "rootCA.crt",NULL)) { 
+    if (!SSL_CTX_load_verify_locations(ssl_client_ctx, "rootCA.crt",NULL)) { 
         errexit("Could not load CA cert\n");
     }
 
-    SSL_CTX_set_verify_depth(client_ctx, 1);
+    /*
+     * OpenSSL has internal callback to verify the client provided certificate. However this callback provide customization, i.e. accepting an
+     * expired certificate for example. The second argument is flag which can be logical ORed. These are:
+     * SSL_VERIFY_NONE: When the context is being used in server mode, no request for a certificate will be sent to the client, and the client
+     * should not send a certificate. 
+     * SSL_VERIFY_PEER: When the context is being used in server mode, a request for a certificate will be sent to the client. The client may opt
+     * to ignore the request, but if a certificate is sent back, it will be verified. If the verification fails, the handshake will be terminated
+     * immediately. When the context is being used in client mode, if the server sends a certificate, it will be verified. If the verification fails,
+     * the handshake will be terminated immediately. The only time that a server would not send a certificate is when an anonymous cipher is in use.
+     * Anonymous ciphers are disabled by default. Any other flags combined with this one in client mode are ignored.
+     * SSL_VERIFY_FAIL_IF_NO_PEER_CERT: If the context is not being used in server mode or if SSL_VERIFY_PEER is not set, this flag is ignored.
+     * Use of this flag will cause the handshake to terminate immediately if no certificate is provided by the client.
+     * SSL_VERIFY_CLIENT_ONCE: If the context is not being used in server mode or if SSL_VERIFY_PEER is not set, this flag is ignored. Use of this flag
+     * will prevent the server from requesting a certificate from the client in the case of a renegotiation. A certificate will still be requested during
+     * the initial handshake.
+     */
+    SSL_CTX_set_verify(ssl_client_ctx, SSL_VERIFY_PEER, cert_verify_callback);
 
-    SSL_CTX_set_verify(client_ctx, SSL_VERIFY_PEER, cert_verify_callback);
-
-    return client_ctx;
+    return ssl_client_ctx;
 }
 
 void
@@ -181,6 +220,7 @@ bev_ssl_readcb(struct bufferevent *bev, void *arg)
 void
 bev_ssl_writecb(struct bufferevent *bev, void *arg)
 {
+    printf("writing to buffer\n");
 }
 
 void
@@ -189,7 +229,8 @@ bev_ssl_eventcb(struct bufferevent *bev, short event, void *arg)
 }
 
 static void
-evbuffer_cleanup(const void *data, size_t len, void *arg) {
+evbuffer_cleanup(const void *data, size_t len, void *arg)
+{
     if (arg != NULL) {
         printf("Freeing up...\n");
         free(arg);
@@ -197,65 +238,66 @@ evbuffer_cleanup(const void *data, size_t len, void *arg) {
 }
 
 static void
-timer_cb(int sock, short which, void *arg) {
+msg_timer_cb(int sock, short which, void *arg)
+{
     struct evbuffer     *p_outbuf;
-    struct bufferevent  *p_buffer_ev;
-    char *str = calloc(10, sizeof(char));
+    char *str = calloc(LINELEN, sizeof(char));
+    char buf[LINELEN];
 
-    strncpy(str, "hello", 6);
+    snprintf(buf, sizeof(buf), "msg: %d", count);
+    strncpy(str, buf, LINELEN);
 
-    if (!evtimer_pending(timer_ev, NULL)) {
-        event_del(timer_ev);
-        p_outbuf = bufferevent_get_output(bev);
-        printf("Sending hello...\n");
-        evbuffer_add_reference(p_outbuf, str, 6, evbuffer_cleanup, str);
-        evtimer_add(timer_ev, &tv);
+    if (p_peer == NULL) {
+        printf("No peer, not sending hello.\n");
+        return;
+    }
+
+    if (!evtimer_pending(p_peer->timer_ev, NULL)) {
+        event_del(p_peer->timer_ev);
+        p_outbuf = bufferevent_get_output(p_peer->bev);
+        evbuffer_add_reference(p_outbuf, str, LINELEN, evbuffer_cleanup, str);
+        printf("Sending msg: %d\n", count++);
+        if (count % 5 == 0) {
+            delete_ssl_peer();
+        } else {
+            evtimer_add(p_peer->timer_ev, &p_peer->tv);
+        }
     }
 }
 
-void
-create_client()
-{
-    t_ssl_peer *p_peer = calloc(1, sizeof(t_ssl_peer));
-    p_peer->ctx = create_ssl_ctx();
-}
-
 int
-main(int argc, char *argv[])
+create_ssl_client()
 {
-    char                *host = "15.0.0.2";
-    int                 port = 4433;
-    const SSL_METHOD    *method;
-    SSL_CTX             *ctx;
-    SSL                 *ssl;
-    BIO                 *sbio; 
-    evutil_socket_t                 fd = -1;
-    struct event_base               *evbase;
+    int         sock, ret, err;
+    
+    p_peer = calloc(1, sizeof(t_ssl_peer));
+    // using default context
+    //p_peer->ctx = client_ctx;
+    p_peer->ssl = SSL_new(ssl_client_ctx);
 
-    evbase = event_base_new();
-    
-    ctx = create_ssl_ctx();
-
-    //ssl initialize
-    ssl = SSL_new(ctx);
-    
-    int     s, n, ret, err;               // socket descriptor, read count
-    
     //  tcp connection
-    s = connectsock(host, port);
+    if (connectsock(host, port) != ERR_OK) {
+        printf("Error in tcp connection.\n");
+        return TCP_ERR;
+    }
 
-    printf("Connected to host %s on %d\n", host, s);
-    
+    printf("Connected to host %s on %d\n", host, p_peer->listener_fd);
+
+    if (!(ret = SSL_set_fd(p_peer->ssl, p_peer->listener_fd))) {
+        printf("SSL error: %d setting fd.", SSL_get_error(p_peer->ssl, ret));
+    }
+
     // enable ssl communication
-    sbio = BIO_new_socket(s, BIO_NOCLOSE);
-    SSL_set_bio(ssl, sbio, sbio);
-    
-    while ((ret = SSL_connect(ssl)) != 1) {
-        err = SSL_get_error(ssl, ret);
+    // TODO in viptela we don't use it but free it, probably being used only for dtls
+    //p_peer->sbio = BIO_new_socket(sock, BIO_NOCLOSE);
+    //SSL_set_bio(p_peer->ssl, p_peer->sbio, p_peer->sbio);
+
+    printf("Trying SSL connect again.\n");
+    while (!(ret = SSL_connect(p_peer->ssl))) {
+        err = SSL_get_error(p_peer->ssl, ret);
         if (err == SSL_ERROR_WANT_READ    ||
                    SSL_ERROR_WANT_WRITE   ||
                    SSL_ERROR_WANT_CONNECT) {
-            printf("Trying SSL connect again.\n");
         } else {
             printf("SSL connect error.\n");
             return 1;
@@ -264,28 +306,128 @@ main(int argc, char *argv[])
 
     printf("SSL connect successfull..\n");
 
-    bev = bufferevent_openssl_socket_new(evbase, -1, ssl, BUFFEREVENT_SSL_OPEN, BEV_OPT_CLOSE_ON_FREE);
+    // we should probably put -1 as socket as the socket already present in p_peer->ssl
+    // For socket-based bufferevent if the SSL object already has a socket set, you do not need to provide the socket: just pass -1.
+    // TODO In viptela we're not using BEV_OPT_CLOSE_ON_FREE as option
+    //p_peer->bev = bufferevent_openssl_socket_new(evbase, -1, p_peer->ssl, BUFFEREVENT_SSL_OPEN, BEV_OPT_CLOSE_ON_FREE);
+    p_peer->bev = bufferevent_openssl_socket_new(evbase, -1, p_peer->ssl, BUFFEREVENT_SSL_OPEN, 0);
 
-    bufferevent_enable(bev, EV_READ | EV_WRITE);
+    // once we have bev we don't need the SSL pointer as bev will have the SSL
+    p_peer->ssl = NULL;
 
-    bufferevent_setcb(bev, bev_ssl_readcb, bev_ssl_writecb, bev_ssl_eventcb, NULL);
+    bufferevent_enable(p_peer->bev, EV_READ | EV_WRITE);
 
+    bufferevent_setcb(p_peer->bev, bev_ssl_readcb, bev_ssl_writecb, bev_ssl_eventcb, NULL);
+
+    p_peer->tv.tv_sec = MSG_SEND_INTERVAL_SEC;
+    p_peer->tv.tv_usec = MSG_SEND_INTERVAL_MSEC;
+
+    p_peer->timer_ev = evtimer_new(evbase, msg_timer_cb, NULL);
+
+    evtimer_add(p_peer->timer_ev, &p_peer->tv);
+
+    return 0;
+}
+
+void
+delete_ssl_peer()
+{
+    SSL *ssl;
+    evutil_socket_t fd = -1;
+
+    if (p_peer->bev == NULL) {
+        return;
+    }
+
+    ssl = bufferevent_openssl_get_ssl(p_peer->bev);
+
+    //SSL_set_shutdown(ssl, SSL_SENT_SHUTDOWN);
+    //SSL_set_shutdown(ssl, SSL_RECEIVED_SHUTDOWN);
+    //SSL_set_shutdown(ssl, SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
+
+    int ret;
+    printf("SSL %p\n", ssl);
+    ret = SSL_shutdown(ssl);
+    printf("SSL %p\n", ssl);
+    printf("SSL Err: %d\n", SSL_get_error(ssl, ret));
+    if (ret == 0) {
+        printf("Sending another ssl shutdown.\n");
+        ret = SSL_shutdown(ssl);
+        printf("SSL Err: %d\n", SSL_get_error(ssl, ret));
+    }
+
+    //SSL_free(ssl);
+    p_peer->ssl = NULL;
+
+    bufferevent_setcb(p_peer->bev, NULL, NULL, NULL, NULL);
+    bufferevent_free(p_peer->bev);
+    p_peer->bev = NULL;
+
+    if (ssl) {
+        printf("Freeing SSL\n");
+        //SSL_free(ssl);
+    }
+
+    if (p_peer->listener_fd >= 0) {
+        close(p_peer->listener_fd);
+    }
+
+    free(p_peer);
+    p_peer = NULL;
+}
+
+static void
+client_timer_cb(int sock, short which, void *arg)
+{
+    char *mode = (char*) arg;
+
+    if (evtimer_pending(client_add_timer, NULL)) {
+        return;
+    }
+
+    if (strcmp(mode, "add") == 0) {
+        event_del(client_add_timer);
+        create_ssl_client();
+        //client_del_timer = evtimer_new(evbase, client_timer_cb, "del");
+        //evtimer_add(client_del_timer, &del_tv);
+        tv.tv_sec = 30;
+        evtimer_add(client_add_timer, &tv);
+    } else {
+        event_del(client_del_timer);
+        if (p_peer != NULL) {
+            printf("Deleting ssl peer.\n");
+            delete_ssl_peer();
+
+            printf("Deleted peer.\n");
+        }
+        evtimer_add(client_del_timer, &del_tv);
+    }
+
+    //evtimer_add(timer_ev, &tv);
+}
+
+int
+main(int argc, char *argv[])
+{
+    evbase = event_base_new();
+
+    create_ssl_ctx();
+    
     //ret = bufferevent_socket_connect(bev, (struct sockaddr *)&sin, sizeof(struct sockaddr_in));
     //printf("ret: %d\n", ret);
+    del_tv.tv_sec = CLIENT_DEL_INTERVAL_SEC;
+    del_tv.tv_usec = CLIENT_ADD_INTERVAL_MSEC;
 
-    printf("bufferevent\n");
+    tv.tv_sec = CLIENT_ADD_INTERVAL_SEC;
+    tv.tv_usec = CLIENT_ADD_INTERVAL_MSEC;
 
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
+    client_add_timer = evtimer_new(evbase, client_timer_cb, "add");
 
-    timer_ev = evtimer_new(evbase, timer_cb, NULL);
+    evtimer_add(client_add_timer, &tv);
 
-    evtimer_add(timer_ev, &tv);
-    
     event_base_loop(evbase, 0);
 
-    SSL_CTX_free(ctx);
-    bufferevent_free(bev);
+    printf("Exiting...\n");
     event_base_free(evbase);
     
     exit(0);

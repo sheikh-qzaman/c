@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 
 #include <sys/errno.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -16,9 +17,16 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
+#include <event.h>
+#include <event2/event-config.h>
+#include <event2/bufferevent.h>
+#include <event2/bufferevent_ssl.h>
+#include <event2/util.h>
+
 extern int    errno;
 
 #define LINELEN 128
+#define MAX_SELECT_ATTEMPTS 50  
 
 int errexit(const char *format, ...)
 {
@@ -30,127 +38,137 @@ int errexit(const char *format, ...)
 	exit(1);
 }
 
-int
-connectsock(const char *host, int port)
+static int
+cert_verify_callback(int preverify_ok, X509_STORE_CTX *ctx)
 {
-    struct hostent      *phe; 	/* pointer to host information entry    */
-    struct sockaddr_in  sin; 	/* an Internet endpoint address         */
-    int                 sock; 	/* socket descriptor                    */
+    char buf[256];
+    X509 *err_cert;
+    int err, depth;
 
-    memset(&sin, 0, sizeof(sin));
-    sin.sin_family = AF_INET;
+    printf("certify verify callback()\n");
+    err_cert = X509_STORE_CTX_get_current_cert(ctx);
+    err = X509_STORE_CTX_get_error(ctx);
+    depth = X509_STORE_CTX_get_error_depth(ctx);
+    X509_NAME_oneline(X509_get_subject_name(err_cert), buf, 256);
 
-    /* Map port number (char string) to port number (int)*/
-    if ((sin.sin_port = htons(port)) == 0) {
-        errexit("can't get \"%d\" port number\n", port);
+    if (err) {
+        printf("Certificate ERROR: [ %s ] \nPlease check certificate [ %s ] depth : [ %d ] \n",
+                    X509_verify_cert_error_string(err), buf, depth);
     }
 
-    /* Map host name to IP address, allowing for dotted decimal
-    if ( phe = gethostbyname(host) ) {
-        memcpy(&sin.sin_addr, phe->h_addr, phe->h_length);
-    } else if ( (sin.sin_addr.s_addr = inet_addr(host)) == INADDR_NONE ) {
-        errexit("can't get \"%s\" host entry\n", host);
-    } */
+    return preverify_ok;
+}
 
-    sin.sin_addr.s_addr = inet_addr(host);
+static SSL_CTX*
+create_ssl_ctx()
+{
+    SSL_CTX  *client_ctx;
 
-    /* Allocate a socket */
-    sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock < 0) {
-        errexit("can't create socket: %s\n", strerror(errno));
+    /* Initialize the OpenSSL library */
+    SSL_library_init();
+    SSL_load_error_strings();
+
+    /* We MUST have entropy, or else there's no point to crypto. */
+    if (!RAND_poll()) {
+        return NULL;
     }
 
-    /* Connect the socket */
-    if (connect(sock, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
-        errexit("can't connect to %s.%d: %s\n", host, port, strerror(errno));
+    client_ctx = SSL_CTX_new(SSLv23_client_method());
+
+    SSL_CTX_set_verify_depth(client_ctx, 1);
+
+    SSL_CTX_set_ecdh_auto(client_ctx, 1);
+
+    // ca certificate
+    if (!SSL_CTX_load_verify_locations(client_ctx, "rootCA.crt",NULL)) { 
+        errexit("Could not load CA cert\n");
     }
 
-    return sock;
+    SSL_CTX_set_verify(client_ctx, SSL_VERIFY_PEER, cert_verify_callback);
+
+    return client_ctx;
+}
+
+void
+bev_ssl_readcb(struct bufferevent *bev, void *arg)
+{
+    //printf("++++++++++++++ (%s : %d : %d) +++++++++++\n", __FUNCTION__, __LINE__, print_cnt++);
+    /* Drain the buffer no one is interested */
+    evbuffer_drain(bufferevent_get_input(bev), EVBUFFER_LENGTH(bev->input));
+}
+
+void
+bev_ssl_writecb(struct bufferevent *bev, void *arg)
+{
+    //printf("++++++++++++++ (%s : %d : %d) +++++++++++\n", __FUNCTION__, __LINE__, print_cnt++);
+}
+
+void
+bev_ssl_eventcb(struct bufferevent *bev, short event, void *arg)
+{
 }
 
 int
 main(int argc, char *argv[])
 {
-    char                *host = "15.0.0.2";
-    int                 port = 4433;
-    const SSL_METHOD    *method;
-    SSL_CTX             *ctx;
-    SSL                 *ssl;
-    BIO                 *sbio; 
+    char                            *host = "15.0.0.2";
+    int                             port = 4433;
+    const SSL_METHOD                *method;
+    SSL_CTX                         *ctx;
+    SSL                             *ssl;
+    BIO                             *sbio; 
+    enum bufferevent_options        bev_opts = 0;
+    struct bufferevent              *buf_ev;
+    evutil_socket_t                 fd = -1;
+    struct event_base               *evbase;
+    struct sockaddr_in              sin; 	/* an Internet endpoint address         */
+    char                            buf[LINELEN+1];     // buffer for one line of text
+    int                             sock, n, ret, err;               // socket descriptor, read count
+    int                             outchars, inchars;  // characters sent and received    
     
-    // load encryption & hash algorithms for SSL
-    SSL_library_init();
-    
-    // load the error strings for good error reporting            
-    SSL_load_error_strings();
-    
-    // create context
-    method = SSLv23_client_method();
-    ctx = SSL_CTX_new(method);
-    
-    // ca certificate
-    if (!SSL_CTX_load_verify_locations(ctx, "rootCA.crt",NULL)) { 
-        errexit("Could not load CA cert\n");
+    // create ssl context
+    ctx = create_ssl_ctx();    
+    if (!ctx) {
+        return 1;
     }
-    
-    SSL_CTX_set_verify_depth(ctx, 1);
-    
+
     //ssl initialize
     ssl = SSL_new(ctx);
-    
-    // talk to the server
-    char    buf[LINELEN+1];     // buffer for one line of text
-    int     s, n, r;               // socket descriptor, read count
-    int     outchars, inchars;  // characters sent and received    
-    
-    //  tcp connection
-    s = connectsock(host, port);
 
-    printf("Connected to host %s on %d\n", host, s);
+    evbase = event_base_new();
     
-    // enable ssl communication
-    sbio = BIO_new_socket(s, BIO_NOCLOSE);
-    SSL_set_bio(ssl, sbio, sbio);
-    
-    if((r = SSL_connect(ssl)) <= 0) {
-        errexit("SSL connect failed\n%d\n",r);
-    }
-    
-    if(SSL_get_peer_certificate(ssl) != NULL){
-        if(SSL_get_verify_result(ssl) != X509_V_OK) {
-            errexit("Could not verify peer certificate\n");    
-        }
-    } else {
-        errexit("Could not get peer certificate\n");
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(port);
+    sin.sin_addr.s_addr = inet_addr(host);
+
+    bev_opts = BEV_OPT_CLOSE_ON_FREE;
+
+    buf_ev = bufferevent_openssl_socket_new(evbase, fd, ssl, BUFFEREVENT_SSL_CONNECTING, bev_opts);
+    if (buf_ev == NULL) {
+        printf("Bufferevet creation failed for client: %d\n", fd);
+        exit(0);
     }
 
-	while (fgets(buf, sizeof(buf), stdin)) {
-        buf[LINELEN] = '\0';    /* ensure line null-terminated    */
-        outchars = strlen(buf);
-        (void) SSL_write(ssl, buf, outchars);
+    bufferevent_enable(buf_ev, EV_READ | EV_WRITE);
 
-        if (strncmp(buf, "exit", 4) == 0) {
-            break;
-        }
-
-        n = SSL_read(ssl, &buf, LINELEN);
-        printf("%d: ", n);
-
-        /*
-        for (inchars = 0; inchars < outchars; inchars+=n ) {
-            n = SSL_read(ssl, &buf[inchars], outchars - inchars);
-            if (n < 0)  {
-                errexit("socket read failed: %s\n", strerror(errno));
-            }
-        }
-        */
-
-        fputs(buf, stdout);
-    }
-
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    close(s);
+    bufferevent_setcb(buf_ev, bev_ssl_readcb, bev_ssl_writecb, bev_ssl_eventcb, NULL);
     
+    ret = bufferevent_socket_connect(buf_ev, (struct sockaddr *)&sin, sizeof(struct sockaddr_in));
+    printf("ret: %d\n", ret);
+
+    fd = bufferevent_getfd(buf_ev);
+
+    printf("Connected to host %s on %d\n", host, fd);
+
+    event_base_loop(evbase, 0);
+
+    SSL_CTX_free(ctx);
+
+    bufferevent_free(buf_ev);
+    
+    event_base_free(evbase);
+
+    printf("Exiting...\n");
     exit(0);
 }
