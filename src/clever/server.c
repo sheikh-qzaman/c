@@ -1,10 +1,13 @@
 #include <stdio.h> 
 #include <netdb.h> 
 #include <netinet/in.h> 
+#include <arpa/inet.h>
 #include <stdlib.h> 
 #include <string.h> 
 #include <sys/socket.h> 
 #include <sys/types.h> 
+#include <unistd.h>
+
 #define MAX 80 
 #define PORT 8080 
 #define SA struct sockaddr 
@@ -28,14 +31,14 @@ void func(int sockfd)
         while ((buff[n++] = getchar()) != '\n') 
             ; 
   
-        // and send that buffer to client 
-        write(sockfd, buff, sizeof(buff)); 
   
         // if msg contains "Exit" then server exit and chat ended. 
         if (strncmp("exit", buff, 4) == 0) { 
             printf("Server Exit...\n"); 
             break; 
         } 
+
+        write(sockfd, buff, sizeof(buff)); 
     } 
 } 
   
@@ -50,14 +53,22 @@ int main()
     if (sockfd == -1) { 
         printf("socket creation failed...\n"); 
         exit(0); 
-    } 
-    else
+    } else {
         printf("Socket successfully created..\n"); 
+    }
+
+    int optval = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) == -1) {
+        printf("Error setting socket option SO_REUSEADDR.");
+        exit(0);
+    }
+
     bzero(&servaddr, sizeof(servaddr)); 
   
     // assign IP, PORT 
     servaddr.sin_family = AF_INET; 
-    servaddr.sin_addr.s_addr = htonl(INADDR_ANY); 
+    //servaddr.sin_addr.s_addr = htonl(INADDR_ANY); 
+    servaddr.sin_addr.s_addr = inet_addr("15.0.0.2");
     servaddr.sin_port = htons(PORT); 
   
     // Binding newly created socket to given IP and verification 
@@ -82,10 +93,10 @@ int main()
     if (connfd < 0) { 
         printf("server acccept failed...\n"); 
         exit(0); 
-    } 
-    else
+    } else {
         printf("server acccept the client...\n"); 
-  
+    }
+
     // Function for chatting between client and server 
     func(connfd); 
   

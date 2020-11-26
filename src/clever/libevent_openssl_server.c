@@ -17,18 +17,56 @@
 static void
 ssl_readcb(struct bufferevent * bev, void * arg)
 {
+    printf("Reading from buffer\n");
     struct evbuffer *in = bufferevent_get_input(bev);
 
     printf("Received %zu bytes\n", evbuffer_get_length(in));
     printf("----- data ----\n");
     printf("%.*s\n", (int)evbuffer_get_length(in), evbuffer_pullup(in, -1));
 
+    printf("Writing to buffer\n");
     bufferevent_write_buffer(bev, in);
+    printf("Wrote to buffer\n");
 }
 
 static void
-ssl_acceptcb(struct evconnlistener *serv, int sock, struct sockaddr *sa,
-             int sa_len, void *arg)
+ssl_writecb(struct bufferevent *bev, void *ctx)
+{
+    printf("BEV_EVENT_WRITE\n");
+}
+
+static void
+ssl_eventcb(struct bufferevent *bev, short event, void *ctx)
+{
+    if (event & BEV_EVENT_CONNECTED) {
+        printf("BEV_EVENT_CONNECTED\n");
+    }
+
+    if (event & BEV_EVENT_READING) {
+        printf("BEV_EVENT_READING\n");
+        printf(evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+        printf("\n");
+    }
+
+    if (event & BEV_EVENT_WRITING) {
+        printf("BEV_EVENT_WRITING\n");
+    }
+
+    if (event & BEV_EVENT_ERROR) {
+        printf("BEV_EVENT_ERROR\n");
+    }
+
+    if (event & BEV_EVENT_EOF) {
+        printf("BEV_EVENT_EOF\n");
+    }
+
+    if (event & BEV_EVENT_TIMEOUT) {
+        printf("BEV_EVENT_TIMEOUT\n");
+    }
+}
+
+static void
+ssl_acceptcb(struct evconnlistener *serv, int sock, struct sockaddr *sa, int sa_len, void *arg)
 {
     struct event_base *evbase;
     struct bufferevent *bev;
@@ -45,12 +83,12 @@ ssl_acceptcb(struct evconnlistener *serv, int sock, struct sockaddr *sa,
                                          BUFFEREVENT_SSL_ACCEPTING,
                                          BEV_OPT_CLOSE_ON_FREE);
 
-    bufferevent_enable(bev, EV_READ);
-    bufferevent_setcb(bev, ssl_readcb, NULL, NULL, NULL);
+    bufferevent_enable(bev, EV_READ | EV_WRITE);
+    bufferevent_setcb(bev, ssl_readcb, ssl_writecb, ssl_eventcb, NULL);
 }
 
 static SSL_CTX *
-evssl_init(void)
+create_ssl_ctx(void)
 {
     SSL_CTX  *server_ctx;
 
@@ -64,18 +102,6 @@ evssl_init(void)
     server_ctx = SSL_CTX_new(SSLv23_server_method());
 
     SSL_CTX_set_ecdh_auto(server_ctx, 1);
-
-    /*
-    if (! SSL_CTX_use_certificate_chain_file(server_ctx, "cert") ||
-        ! SSL_CTX_use_PrivateKey_file(server_ctx, "pkey", SSL_FILETYPE_PEM)) {
-        puts("Couldn't read 'pkey' or 'cert' file.  To generate a key\n"
-           "and self-signed certificate, run:\n"
-           "  openssl genrsa -out pkey 2048\n"
-           "  openssl req -new -key pkey -out cert.req\n"
-           "  openssl x509 -req -days 365 -in cert.req -signkey pkey -out cert");
-        return NULL;
-    }
-    */
 
     /* Set the key and cert */
     if (SSL_CTX_use_certificate_file(server_ctx, "server.crt", SSL_FILETYPE_PEM) <= 0) {
@@ -109,7 +135,7 @@ main(int argc, char **argv)
     //sin.sin_addr.s_addr = htonl(0x7f000001); /* 127.0.0.1 */
     sin.sin_addr.s_addr = inet_addr("15.0.0.2"); 
 
-    ctx = evssl_init();
+    ctx = create_ssl_ctx();
     if (ctx == NULL) {
         return 1;
     }
